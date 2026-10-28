@@ -173,6 +173,7 @@ st.caption(
 
 with st.expander("Training report", expanded=False):
     st.write("Selected predictors:", result["features"])
+    st.write("Engineered transaction features:", result.get("derived_features", []))
     st.write("Excluded:", result["excluded"])
     st.write("Automatically removed empty/constant predictors:", result["removed_constant"])
     st.write("Split:", "Chronological by " + time_col if time_col else "Stratified random 60/20/20")
