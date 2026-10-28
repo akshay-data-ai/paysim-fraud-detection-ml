@@ -74,12 +74,22 @@ def _split(frame: pd.DataFrame, y: pd.Series, time_col: str | None):
             raise ValueError("Time column has missing values. Fix these before chronological splitting.")
         chronological = frame.sort_values(time_col, kind="mergesort")
         sorted_y = y.loc[chronological.index]
-        n = len(chronological)
-        cut1, cut2 = int(n * .60), int(n * .80)
-        parts = (
-            (chronological.iloc[:cut1], sorted_y.iloc[:cut1]),
-            (chronological.iloc[cut1:cut2], sorted_y.iloc[cut1:cut2]),
-            (chronological.iloc[cut2:], sorted_y.iloc[cut2:]),
+        # Split at distinct time-step boundaries: the same simulated step
+        # must never appear in both training and validation/test periods.
+        unique_steps = chronological[time_col].drop_duplicates().sort_values().to_numpy()
+        if len(unique_steps) < 5:
+            raise ValueError("Need at least five unique time steps for a chronological split.")
+        first = unique_steps[int(len(unique_steps) * .60)]
+        second = unique_steps[int(len(unique_steps) * .80)]
+        period = chronological[time_col]
+        masks = (
+            period < first,
+            (period >= first) & (period < second),
+            period >= second,
+        )
+        parts = tuple(
+            (chronological.loc[mask], sorted_y.loc[mask])
+            for mask in masks
         )
         # A different label appearing late is common in event data; do not hide it.
         for label, (_, target_subset) in zip(("training", "validation", "test"), parts):
