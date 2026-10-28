@@ -23,7 +23,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 from sklearn.tree import DecisionTreeClassifier
 
 RANDOM_STATE = 42
@@ -144,6 +144,32 @@ def _feature_schema(frame: pd.DataFrame):
     return numerical, categorical, remove
 
 
+AUTO_FEATURES = ("auto_amount_balance_ratio", "auto_log_amount")
+
+
+def add_transaction_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Derive row-local financial signals without looking at fraud labels.
+
+    FunctionTransformer keeps the same logic within exported pipelines,
+    including when scoring future unlabeled data.
+    """
+    result = frame.copy()
+    if {"amount", "oldbalanceOrg"}.issubset(result.columns):
+        amount = pd.to_numeric(result["amount"], errors="coerce").to_numpy(dtype=np.float64)
+        balance = pd.to_numeric(result["oldbalanceOrg"], errors="coerce").to_numpy(dtype=np.float64)
+        valid_amount = np.isfinite(amount) & (amount >= 0)
+        valid_balance = np.isfinite(balance) & (balance >= 0)
+        ratio = np.full(len(result), np.nan, dtype=np.float64)
+        valid = valid_amount & valid_balance
+        ratio[valid & (balance == 0)] = 0.0
+        np.divide(amount, balance, out=ratio, where=valid & (balance > 0))
+        result[AUTO_FEATURES[0]] = np.clip(ratio, 0, 100000).astype(np.float32)
+        logs = np.full(len(result), np.nan, dtype=np.float64)
+        logs[valid_amount] = np.log1p(amount[valid_amount])
+        result[AUTO_FEATURES[1]] = logs.astype(np.float32)
+    return result
+
+
 def _pipeline(model, numerical, categorical):
     transformers = []
     if numerical:
@@ -170,7 +196,7 @@ def _pipeline(model, numerical, categorical):
             categorical,
         ))
     preprocessing = ColumnTransformer(transformers=transformers, remainder="drop")
-    return Pipeline([("preprocess", preprocessing), ("classifier", model)])
+    return Pipeline([("auto_features", FunctionTransformer(add_transaction_features, validate=False)), ("preprocess", preprocessing), ("classifier", model)])
 
 
 def _models():
@@ -269,6 +295,10 @@ def train_automl(
         raise ValueError("No features selected.")
     numeric, categorical, constant = _feature_schema(working[selected])
     cols = numeric + categorical
+    # Calculated from permitted pre-transaction columns. The engineered
+    # features are computed inside every fitted pipeline and for inference.
+    derived = [c for c in AUTO_FEATURES if c in add_transaction_features(working[cols]).columns]
+    numeric = numeric + derived
     # Retain time column only for chronological splitting, not training.
     x_data = working[cols + ([time_col] if time_col else [])].copy()
     splits = _split(x_data, y, time_col)
@@ -325,6 +355,7 @@ def train_automl(
         "negative_label": next(item for item in uniques if item != positive_label),
         "target_column": target_col,
         "features": cols,
+        "derived_features": derived,
         "removed_constant": constant,
         "excluded": sorted(ignored - {target_col}),
         "time_column": time_col,
